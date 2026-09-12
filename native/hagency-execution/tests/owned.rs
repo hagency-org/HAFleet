@@ -153,6 +153,7 @@ impl Fixture {
         let mut environment = BTreeMap::from([
             ("PATH".into(), "".into()),
             ("HAGENCY_OFFLINE_MODE".into(), mode.into()),
+            ("HAGENCY_OPERATION_BUDGET_MS".into(), "25000".into()),
         ]);
         if let Some(system) = std::env::var_os("SystemRoot") {
             environment.insert("SystemRoot".into(), system);

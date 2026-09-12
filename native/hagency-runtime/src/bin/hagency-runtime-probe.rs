@@ -4,7 +4,7 @@ mod approval_probe;
 use serde_json::{Value, json};
 use std::{
     fs::{self, OpenOptions},
-    io::{self, BufRead, Write},
+    io::{self, BufRead, Read, Write},
     path::Path,
     process::{Command, Stdio},
     time::{Duration, Instant},
@@ -22,6 +22,43 @@ fn pulse(marker: &Path) -> io::Result<()> {
         std::thread::sleep(Duration::from_millis(20));
     }
     Ok(())
+}
+/// Stay alive after terminal output until the HOST stops ownership, which it
+/// signals by closing our stdin. The old fixed 8 s pulse was a literal while
+/// the harness grants the operation 25 s, so on a loaded host the fixture
+/// could exit while the operation was still running and its next write
+/// failed as `Io` with zero bytes accepted. Waiting for EOF makes the
+/// fixture's lifetime follow the host's; the ceiling is the operation budget
+/// the harness passes (`HAGENCY_OPERATION_BUDGET_MS`, same source as the
+/// host gate bound) plus half again, so a lost close can never outlive the
+/// operation either.
+fn hold_until_stdin_closed(marker: &Path, budget_ms: u64) -> io::Result<()> {
+    let (closed, host_closed) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        let mut stdin = io::stdin().lock();
+        let mut byte = [0u8; 1];
+        // Block until the host closes our stdin (EOF) or the stream errors.
+        while stdin.read(&mut byte).unwrap_or(0) != 0 {}
+        let _ = closed.send(());
+    });
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(marker.with_extension("pulse"))?;
+    let until = Instant::now() + Duration::from_millis(budget_ms + budget_ms / 2);
+    loop {
+        if host_closed.try_recv().is_ok() {
+            return Ok(());
+        }
+        if Instant::now() >= until {
+            return Err(io::Error::other(
+                "held past the host operation budget without a stdin close",
+            ));
+        }
+        file.write_all(b"x")?;
+        file.flush()?;
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 fn gated_pulse(marker: &Path) -> io::Result<()> {
     let mut file = OpenOptions::new()
@@ -301,9 +338,20 @@ fn fake(mode: &str, marker: &Path) -> io::Result<()> {
         "turn/completed",
         json!({ "threadId": "owned-thread", "turn": { "id": "owned-turn", "status": "completed", "items": [] } }),
     )?;
-    // Stay alive after writing terminal output. The host must explicitly stop
-    // ownership; the fixture does not convert protocol completion into exit.
-    let outcome = pulse(marker);
+    // Stay alive after writing terminal output until the HOST stops ownership
+    // (stdin close). The old fixed 8 s pulse was a literal while the owned
+    // harness grants the operation 25 s, so on a loaded host the fixture
+    // could exit while the operation was still running and its next write
+    // failed as `Io` with zero bytes accepted. Harnesses that pass
+    // `HAGENCY_OPERATION_BUDGET_MS` get the derived hold; anything else keeps
+    // the legacy pulse so unrelated fixtures are unaffected.
+    let outcome = match std::env::var("HAGENCY_OPERATION_BUDGET_MS") {
+        Ok(value) => match value.parse::<u64>() {
+            Ok(budget_ms) => hold_until_stdin_closed(marker, budget_ms),
+            Err(_) => pulse(marker),
+        },
+        Err(_) => pulse(marker),
+    };
     if let Some(child) = &mut child {
         let _ = child.kill();
         let _ = child.wait();

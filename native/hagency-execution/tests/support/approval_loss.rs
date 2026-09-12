@@ -32,6 +32,10 @@ fn host(root: &std::path::Path, fault: Fault, mode: &str) -> Host {
     let mut environment = BTreeMap::from([
         ("PATH".into(), "".into()),
         ("HAGENCY_OFFLINE_MODE".into(), mode.into()),
+        // The probe derives its post-response lifetime from the operation
+        // budget every scenario below grants (`Limits::operation_ms`, 25 s),
+        // so no probe-side literal can undercut a host bound.
+        ("HAGENCY_OPERATION_BUDGET_MS".into(), "25000".into()),
     ]);
     if let Some(system) = std::env::var_os("SystemRoot") {
         environment.insert("SystemRoot".into(), system);
@@ -1256,4 +1260,82 @@ async fn native_owned_approval_armed_frame_precedes_buffered_event() {
     assert_eq!(usage.observed, 1, "buffered event was dropped: {usage:?}");
     assert_eq!(usage.acknowledged, 1);
     assert!(!usage.rejected);
+}
+
+/// A frame whose peer vanished before its first byte is never uncertain
+/// (design Q4): the `owned-approval-eof` probe exits right after its
+/// callback, so the armed response frame's first write fails with zero
+/// bytes accepted. The verdict names the refusal (`PeerUnavailable`), the
+/// observation carries the arm and `accepted_bytes == 0`, and no accepted
+/// row is manufactured — distinct from both `Protocol` (malformed bytes)
+/// and the reconcile's uncertainty (a written frame's lost acknowledgement).
+#[tokio::test]
+async fn native_owned_approval_peer_gone_before_first_byte() {
+    let root = tempfile::tempdir().unwrap();
+    let work = root.path().join("work");
+    hagency_store::private::directory(&work).unwrap();
+    let work = work.canonicalize().unwrap();
+    let (domain, cap) = fixture(root.path());
+    // RecheckGate without an attached gate is inert: the take() finds None.
+    let mut op = Operation::start(
+        domain.clone(),
+        cap.clone(),
+        host(&work, Fault::RecheckGate, "owned-approval-eof"),
+        Limits {
+            operation_ms: 25_000,
+            response_ms: 1500,
+        },
+    )
+    .unwrap();
+    let mut notices = op.take_approval_requests().unwrap();
+    let notice = tokio::time::timeout(Duration::from_secs(6), notices.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    choose(&domain, notice.request_id).await;
+    let report = op.wait().await.unwrap();
+    assert_eq!(
+        report.failure,
+        Some(Failure::PeerUnavailable),
+        "{:?} {:?}; trace: {}; cancelled: {}",
+        report.failure,
+        report.runtime_observation(),
+        hagency_execution::diagnostics::dispatch_trace(&cap.dispatch_id),
+        hagency_execution::diagnostics::last_cancellation_trace(&cap.dispatch_id)
+    );
+    // The observation names the failing arm and proves zero accepted bytes.
+    let observation = report.runtime_observation().expect("observation");
+    assert!(
+        matches!(
+            observation.transport_cause,
+            Some(hagency_runtime::codex::transport::Error::Io(_))
+                | Some(hagency_runtime::codex::transport::Error::PeerEof)
+        ),
+        "{observation:?}"
+    );
+    let write = observation.write.expect("unconfirmed write snapshot");
+    assert_eq!(write.accepted_bytes, 0, "{observation:?}");
+    assert_eq!(write.total_bytes, 51, "{observation:?}");
+    // Never transmitted: no frame reached the wire and no row was accepted.
+    assert!(host_response_frames(&work).is_empty());
+    assert!(!work.join("owned-dispatch.approval-bytes").exists());
+    let sql = rusqlite::Connection::open(root.path().join("state/domain.sqlite3")).unwrap();
+    assert_eq!(
+        sql.query_row(
+            "SELECT COUNT(*) FROM approval_responses WHERE write_accepted=1",
+            [],
+            |row| row.get::<_, u64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        sql.query_row(
+            "SELECT COUNT(*) FROM owner_approvals WHERE state='applied'",
+            [],
+            |row| row.get::<_, u64>(0)
+        )
+        .unwrap(),
+        0
+    );
 }

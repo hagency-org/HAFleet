@@ -155,6 +155,14 @@ Scenario: An armed frame is written before a buffered event is delivered
   When the send path runs
   Then the frame is written and its receipt recorded before the event is delivered with the acceptance row present and nothing lost
 
+Scenario: A frame whose peer vanished before its first byte is never uncertain
+  Test: native_owned_approval_peer_gone_before_first_byte
+  Given an admitted armed frame and no accepted byte on the wire
+  When the send path attempts the first byte
+  Then the observation names the failing arm and reports accepted_bytes 0
+  And the verdict is the named non-uncertain refusal never Protocol
+  And no accepted row is manufactured
+
 ## Out of Scope
 
 Application bootstrap selection and request delivery, private SDK collection,

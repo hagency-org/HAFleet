@@ -8047,3 +8047,45 @@ client qualification and ongoing identity/key management remain separate.
   --tests` clean; runtime lib 5 passed; `--test transport` 8 passed 0
   failed; execution lib 7 passed with 22 EPERM SQLite-wall failures (the
   22nd is the new scenario at the same fixture line, not a regression).
+
+## 2026-09-12 — Report a never-transmitted approval frame distinctly and derive the probe's lifetime
+
+- The designer's second verdict (context-armed-frame-io), both halves:
+  - Harness (the cause of `accepted 0 of 51`): the probe's post-response
+    lifetime was a literal 8 s while the owned harness grants the operation
+    25 s, so on a loaded host the fixture exited while the operation ran and
+    its next write failed as `Io` with zero bytes accepted. The terminal
+    `pulse(marker)` is replaced by `hold_until_stdin_closed(marker, budget)`:
+    pulse for evidence while polling stdin, return on the host's close
+    (ownership stop), with a ceiling of 1.5× the budget passed via
+    `HAGENCY_OPERATION_BUDGET_MS` — the same source the host gate derives
+    from — so no probe-side literal can undercut (or outlive) a host bound.
+    Both owned host builders (approval_loss.rs, owned.rs) pass the env value
+    (25000); harnesses without it keep the legacy pulse.
+  - Product (why it was unreadable): `Error::Io` was a four-way collapse and
+    the approval send path discarded every transport error into
+    `Failure::Protocol`. `Error::Io` now names its arm (`"stdin write"`,
+    `"stdin flush"`, `"stdout read"`, `"stderr read"`) at every site, and the
+    send path maps "peer stream gone at zero accepted bytes" — the
+    termination snapshot's `unconfirmed_write.accepted_bytes == 0` — to the
+    new distinct, non-uncertain `Failure::PeerUnavailable` (own
+    `OwnedFailure::PeerUnavailable` variant, own `peer_unavailable` label).
+    `Protocol` keeps genuine malformed-frame refusals; any byte accepted
+    keeps the existing verdicts and the reconcile's uncertainty.
+- Tests: `native_never_transmitted_frame_is_peer_unavailable` and the
+  negative control `native_partial_write_keeps_protocol_and_uncertainty`
+  (unit, all four transport causes + the Capacity-excluded case);
+  `native_owned_approval_peer_gone_before_first_byte` (e2e, the
+  `owned-approval-eof` probe as the dead-peer fixture): asserts
+  `PeerUnavailable` never `Protocol`, the observation names the arm with
+  `accepted_bytes == 0`/`total_bytes == 51`, no wire frame, no bytes file,
+  zero accepted rows, zero applied rows. Spec binding beside the other
+  approval scenarios.
+- ADR-046 gains the never-transmitted paragraph (the rule, the
+  discriminator, what keeps `Protocol`, the no-retry/no-authority note).
+- Gates: fmt, clippy (runtime + execution + hagency, all targets), `check
+  --tests` clean; runtime lib 5 passed; `--test transport` 8 passed 0
+  failed (the contract test's own `Error::Io` assertion updated to the named
+  arm — `drop(stdin)` now yields `Io("stdin write")`); execution lib 9
+  passed with 23 EPERM SQLite-wall failures (the 23rd is the new scenario
+  at the same fixture line, not a regression).

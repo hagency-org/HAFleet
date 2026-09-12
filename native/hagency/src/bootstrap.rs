@@ -197,6 +197,7 @@ fn owned_failure_label(error: hagency_execution::Failure) -> &'static str {
         Deadline => "deadline",
         CleanupUnknown => "cleanup_unknown",
         SettlementUnknown => "settlement_unknown",
+        PeerUnavailable => "peer_unavailable",
         Worker => "worker",
     }
 }
@@ -239,7 +240,7 @@ fn transport_error_label(error: hagency_runtime::codex::transport::Error) -> &'s
         Closed => "closed",
         CancelledOperation => "cancelled_operation",
         Timeout => "timeout",
-        Io => "io",
+        Io(_) => "io",
         PeerEof => "peer_eof",
         Capacity => "capacity",
         HostClosed => "host_closed",

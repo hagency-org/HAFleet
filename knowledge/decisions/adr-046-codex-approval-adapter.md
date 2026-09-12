@@ -391,3 +391,20 @@ frame now precedes any event that was buffered before the frame's first
 byte: `prepared_inner` drains such input into the queue and writes the frame
 first, so `write-accepted` and `recorded` are reached before the resolution
 or turn end that would otherwise strand the unsent entry.
+
+**Never-transmitted frames (with ADR-034's named I/O arms).** A response
+frame with **zero accepted bytes** was never transmitted: no byte reached the
+peer, so there is no lost response to be uncertain about and no idempotency
+question to resolve. A transport refusal there — the peer's stream gone,
+which the transport now names by arm (`Io("stdin write")` and kin) — maps to
+the distinct, **non-uncertain** `Failure::PeerUnavailable`, never
+`Protocol` (which stays for genuine malformed-frame refusals) and never the
+reconcile's uncertainty. The discriminator is the termination snapshot's
+`unconfirmed_write.accepted_bytes == 0`: once any byte is accepted the frame
+was transmitted, the send refusal keeps its fencing verdict, and a written
+frame whose acknowledgement was lost stays with the settlement rules above.
+No retry is implied and no authority is created; the point is that the
+report stops claiming a protocol fault for a peer that vanished.
+`native_owned_approval_peer_gone_before_first_byte` pins the verdict, and
+`native_partial_write_keeps_protocol_and_uncertainty` is the negative
+control.
