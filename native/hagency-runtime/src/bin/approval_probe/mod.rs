@@ -104,25 +104,6 @@ pub(super) fn run(mode: &str, reader: &mut impl BufRead, marker: &Path) -> io::R
         // drive promptly, quietly, with no approval frame on the wire.
         return Ok(true);
     }
-    if mode == "owned-approval-write-first" {
-        // The armed-frame window (design Q3): hold at the host's recheck
-        // gate, put one buffered event on the wire, and confirm it is there
-        // (`approval-buffered`) BEFORE the test releases the host — so the
-        // event is ready in the pipe when the armed frame's first write step
-        // polls. The host must write the frame first, record its receipt,
-        // and deliver the event afterwards; nothing is lost.
-        gate(marker)?;
-        note(
-            "thread/tokenUsage/updated",
-            json!({"threadId":"owned-thread","turnId":"owned-turn","tokenUsage":{
-                "total":{"totalTokens":11,"inputTokens":10,"cachedInputTokens":0,"outputTokens":1,"reasoningOutputTokens":0},
-                "last":{"totalTokens":11,"inputTokens":10,"cachedInputTokens":0,"outputTokens":1,"reasoningOutputTokens":0},"modelContextWindow":200000
-            }}),
-        )?;
-        fs::write(marker.with_extension("approval-buffered"), b"buffered")?;
-        // Fall through to the generic loop: read the armed frame (proving it
-        // was written first), record it, resolve, and end the turn.
-    }
     if mode == "owned-approval-gate-resolve" {
         // Host is held at the recheck gate: in_flight is set and the frame is
         // armed but not yet committed to the OS. Emit the resolution for the

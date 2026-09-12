@@ -200,25 +200,3 @@ adapter's send path uses it to drop — not send — a frame whose transmit path
 is already gone. `write_progress()` is withdrawn with the hold: no stamp
 remains that reads it.
 
-## Amendment (2026-09-12): an armed prepared frame writes before a buffered event is delivered
-
-The prepared (one-shot approval) send path has its own ordering rule, scoped
-so the ordinary path's contract is untouched: **`prepared_inner` never
-returns a buffered event ahead of the armed frame's first byte.** The old
-behaviour returned `Controlled::Event` when input was buffered at
-`offset == 0`, which discarded the frame's write for that call — zero bytes
-accepted, no receipt produced — while the caller received an ordinary update
-and its entry stayed `write: None`, the window in which a later resolution
-or turn end strands an unsent frame. Now, when a buffered message is queued,
-`prepared_inner` drains the buffered bytes into the event queue
-(`drain_parse`) without delivering one, and writes the frame first; the
-buffered events are delivered on a later call, after the frame's receipt.
-Nothing is dropped and no deadline, read clock, or request policy changes.
-
-The ordinary `send` path — and therefore its two pinned contract tests,
-`native_codex_transport_write_complete_and_early_rpc_response` (an upstream
-response is parsed and queued while a prefix of a large request write is
-accepted) and `native_codex_transport_pressure_event_count_and_bytes`
-(flood bytes are counted as `Error::Capacity`, not discovered by deadline) —
-is structurally unaffected: both drive `send`, never `prepared_inner`, and
-`drain_parse` is called only from `prepared_inner`. Both tests pass unchanged.

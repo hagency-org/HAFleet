@@ -177,20 +177,11 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin, E: AsyncRead + Unpin> Driver<R
                 self.step(deadline).await?;
                 continue;
             }
-            // An ARMED prepared frame writes before any buffered event is
-            // delivered. Returning the event here (the old behaviour) discarded
-            // the frame's write for this call with zero bytes accepted, so the
-            // receipt was never produced and the caller received an ordinary
-            // update while its armed entry stayed `write: None` — the window
-            // where a resolution or turn end later strands the entry with the
-            // frame unsent. Buffered events are NOT dropped: they stay queued
-            // (and `parse_input` already queued them) and are delivered on the
-            // next call, after this frame's receipt. This is scoped to the
-            // one-shot prepared path; the ordinary `send` path (ADR-034's
-            // early-response and capacity contracts) is untouched.
-            if self.buffered_event_queued() {
-                // Parse into the queue only; never deliver ahead of the frame.
-                self.drain_parse()?;
+            if let Some(event) = self.buffered_event()? {
+                // Exact Vec custody returns to the original prepared value;
+                // encoding, callback reservation and deadline are not repeated.
+                prepared.bytes = Some(self.writing.take().ok_or(Error::Closed)?.bytes);
+                return Ok(Controlled::Event(event));
             }
             if !self.connection.has_prepared_approval(&prepared.id) {
                 return Err(Error::Closed);

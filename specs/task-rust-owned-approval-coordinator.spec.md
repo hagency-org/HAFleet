@@ -149,11 +149,6 @@ Scenario: A resolved-away frame is never sent
   When the host reaches the send
   Then the operation completes quietly with no failure no Closed cause no frame on the wire and no accepted row
 
-Scenario: An armed frame is written before a buffered event is delivered
-  Test: native_owned_approval_armed_frame_precedes_buffered_event
-  Given an admitted in-flight frame and a buffered event already parsed at zero accepted bytes
-  When the send path runs
-  Then the frame is written and its receipt recorded before the event is delivered with the acceptance row present and nothing lost
 
 Scenario: A frame whose peer vanished before its first byte is never uncertain
   Test: native_owned_approval_peer_gone_before_first_byte

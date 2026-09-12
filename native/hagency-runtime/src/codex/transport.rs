@@ -190,21 +190,6 @@ impl<R, W, E> Driver<R, W, E> {
         self.connection.has_prepared_approval(id)
     }
 
-    /// Parse every complete buffered message into the event queue WITHOUT
-    /// delivering one. Used so an armed frame can write first while input that
-    /// arrived before its first byte is still parsed (no bytes are lost).
-    pub(super) fn drain_parse(&mut self) -> Result<(), Error> {
-        while self.input_start < self.input_end {
-            self.parse_input()?;
-        }
-        Ok(())
-    }
-
-    /// Whether a complete buffered message is already parsed and waiting.
-    pub(super) fn buffered_event_queued(&self) -> bool {
-        self.events.len() > 0 || self.input_start < self.input_end
-    }
-
     /// Drain the transport's received snapshot without reading any more IO.
     /// The session checks partial bytes separately before closing this snapshot.
     pub(super) fn buffered_event(&mut self) -> Result<Option<Event>, Error> {
