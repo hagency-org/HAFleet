@@ -439,16 +439,28 @@ async fn native_alert_sweep_runs_hourly_and_survives_busy() {
     // fail. (`OutcomeUnknown` needs a writer parked past the 2 s reply
     // bound; the only such seam — `Probe::paused` — is `#[cfg(test)]`-
     // private to hagency-store, so that arm stays for the store-side suite.)
+    // One queued job per attempt gave the tick a ~100 ms window and missed
+    // it on a hosted macOS runner; instead a few submitters keep the single
+    // queue slot refilled for the whole attempt while the external lock
+    // holds the writer, so every tick in the window finds the queue full.
     let mut saw_busy = false;
     for _ in 0..5 {
         let lock = rusqlite::Connection::open(&f.state).unwrap();
         lock.execute_batch("BEGIN IMMEDIATE").unwrap();
-        let filler = resource("alerts_pool_a", "alerts_pool_a_seat", 1_000_000);
-        let held_filler = filler.clone();
-        let first_store = f.domain.clone();
-        let second_store = f.domain.clone();
-        let held = tokio::spawn(async move { first_store.put_resource(held_filler).await });
-        let queued = tokio::spawn(async move { second_store.put_resource(filler).await });
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hammers: Vec<_> = (0..4)
+            .map(|_| {
+                let store = f.domain.clone();
+                let stop = stop.clone();
+                tokio::spawn(async move {
+                    while !stop.load(std::sync::atomic::Ordering::Acquire) {
+                        let filler = resource("alerts_pool_a", "alerts_pool_a_seat", 1_000_000);
+                        let _ = store.put_resource(filler).await;
+                        tokio::task::yield_now().await;
+                    }
+                })
+            })
+            .collect();
         let seen = tokio::time::timeout(Duration::from_secs(3), async {
             until(&mut observed, |tick| {
                 matches!(tick, CeilingSweepTick::Refused("busy"))
@@ -456,10 +468,12 @@ async fn native_alert_sweep_runs_hourly_and_survives_busy() {
             .await;
         })
         .await;
+        stop.store(true, std::sync::atomic::Ordering::Release);
         lock.execute_batch("COMMIT").unwrap();
         drop(lock);
-        let _ = held.await;
-        let _ = queued.await;
+        for hammer in hammers {
+            let _ = hammer.await;
+        }
         if seen.is_ok() {
             saw_busy = true;
             break;
