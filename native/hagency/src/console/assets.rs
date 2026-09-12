@@ -80,7 +80,10 @@ fn snapshot(dir: &Dir, path: &str, limit: usize) -> Result<Snapshot, Error> {
 fn mime(path: &str) -> Option<&'static str> {
     if matches!(
         path,
-        "usage/index.html" | "resources/index.html" | "resources/new/index.html"
+        "usage/index.html"
+            | "resources/index.html"
+            | "resources/new/index.html"
+            | "alerts/index.html"
     ) {
         return Some("text/html; charset=utf-8");
     }
@@ -134,6 +137,8 @@ impl Assets {
                 "/console/resources/new/".into()
             } else if entry.path == "resources/index.html" {
                 "/console/resources/".into()
+            } else if entry.path == "alerts/index.html" {
+                "/console/alerts/".into()
             } else {
                 format!("/console/{}", entry.path)
             };

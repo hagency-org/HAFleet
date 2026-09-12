@@ -7935,3 +7935,9 @@ client qualification and ongoing identity/key management remain separate.
   the same broken-pipe case only. The commit message for `01545c8` keeps the old
   wording; this entry and the ADR are the correction. The exit codes are
   documented as diagnostic only, carrying no authority.
+- 2026-09-13: the console alerts slice staged `alerts/index.html` into the
+  built assets but the Rust loader allowlists page documents by path and
+  keys them to console routes, so every console fixture refused the built
+  set (`Error::Assets`) and all six browser tests failed locally. The
+  loader and the document router now know the alerts document (no
+  selection query). All 16 console tests pass with the real browser.
