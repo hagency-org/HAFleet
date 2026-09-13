@@ -96,7 +96,10 @@ afterAll(() => {
 });
 
 describe('native Darwin process metadata', () => {
-  test.skipIf(!nodeIsDarwin)('reads exact argv tokens and cwd from an independently owned process', async () => {
+  // Register platform-specific selectors on every host for specification inventory.
+  // Runtime skips remain skips; only Darwin executes the native observation assertions.
+  test('reads exact argv tokens and cwd from an independently owned process', async ({ skip }) => {
+    if (!nodeIsDarwin) skip('Requires Darwin process metadata APIs');
     const cwd = path.join(tempRoot, 'cwd with spaces 雪');
     mkdirSync(cwd);
     const expectedArgv = ['fixture argv0 with spaces', '--hold', '', 'two words', '中文', 'quote"slash\\'];
@@ -193,7 +196,8 @@ describe('native Darwin process metadata', () => {
     expect(oversized.stderr).toBe('{"category":"argument_data"}\n');
   });
 
-  test.skipIf(!nodeIsDarwin)('rejects failed and short native observations without a fallback', () => {
+  test('rejects failed and short native observations without a fallback', ({ skip }) => {
+    if (!nodeIsDarwin) skip('Requires Darwin process metadata APIs');
     const cases = [
       ['sizing-error', 'process_arguments'],
       ['sizing-oversize', 'process_arguments'],
@@ -222,7 +226,8 @@ describe('native Darwin process metadata', () => {
     }
   });
 
-  test.skipIf(!nodeIsDarwin)('rejects an owned process with empty argv0 without exposing its environment', async () => {
+  test('rejects an owned process with empty argv0 without exposing its environment', async ({ skip }) => {
+    if (!nodeIsDarwin) skip('Requires Darwin process metadata APIs');
     const sentinel = 'EMPTY_ARGV0_PRIVATE_SENTINEL_7c93';
     const fixture = spawn(driver, ['launch-empty', sentinel], {
       cwd: tempRoot,
